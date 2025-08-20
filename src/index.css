@@ -1,0 +1,55 @@
+/* Base */
+* { box-sizing: border-box; }
+:root {
+  --bg: #f9fafb;
+  --card: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --border: #e5e7eb;
+  --shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.1);
+  --radius: 16px;
+}
+html, body, #root { height: 100%; }
+body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; color: var(--text); background: var(--bg); }
+
+/* Layout */
+.page { min-height: 100vh; padding: 24px; }
+.container { max-width: 1100px; margin: 0 auto; display: grid; gap: 24px; }
+.header { display: flex; align-items: center; justify-content: space-between; }
+.title { margin: 0 0 4px; font-size: 32px; font-weight: 800; }
+.muted { color: var(--muted); font-size: 14px; }
+.tiny { color: var(--muted); font-size: 12px; }
+.bold { font-weight: 600; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0,1fr)); }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+/* Cards & controls */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+.card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 8px; }
+.range { width: 100%; }
+.select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+
+/* Buttons */
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 14px; border: 1px solid var(--border); cursor: pointer; box-shadow: var(--shadow); background: var(--card); color: var(--text); }
+.btn:hover { filter: brightness(.98); }
+.btn-dark { background: #111827; color: #fff; border-color: #111827; }
+.btn-white { background: #fff; color: var(--text); }
+.hidden-input { display: none; }
+
+/* Stats & counts */
+.stat { display: grid; gap: 6px; }
+.stat-value { font-weight: 800; font-size: 28px; }
+.stat-inline { font-weight: 600; font-size: 18px; }
+.actions-counts { display: flex; gap: 14px; margin-top: 6px; }
+
+/* Table */
+.table-card { overflow: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th, .table td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.table thead th { text-align: left; color: var(--muted); font-weight: 600; }
+.table tbody tr:hover { background: #f8fafc; }
+.truncate { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Empty state & notes */
+.empty { text-align: center; color: var(--muted); padding: 24px 8px; }
+.note { margin-bottom: 24px; }
