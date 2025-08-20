@@ -25,6 +25,9 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
+      # configura Pages (requerido para el job deploy)
+      - uses: actions/configure-pages@v5
+      # sube el build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
