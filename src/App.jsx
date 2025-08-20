@@ -24,9 +24,7 @@ function normalizeKey(k) {
 function toNumber(v) {
   if (v === null || v === undefined || v === "") return NaN;
   if (typeof v === "number") return v;
-  // strip currency/percent and thousands
   let s = String(v).replace(/[$,%]/g, "").replace(/\s/g, "");
-  // keep last decimal separator
   s = s.replace(/(,)(?=.\d{1,2}$)/, ".").replace(/,/g, "");
   const n = Number(s);
   return Number.isFinite(n) ? n : NaN;
@@ -46,7 +44,8 @@ function stddev(arr) {
   return Math.sqrt(variance);
 }
 
-function classify(value, m, s, sigma = 1) {
+// For metrics where "higher is good" (ROAS/Profit/CTR)
+function classifyGood(value, m, s, sigma = 1) {
   if (!Number.isFinite(value) || !Number.isFinite(m) || !Number.isFinite(s) || s === 0) return "—";
   const z = (value - m) / s;
   if (z > sigma) return "📈 Very High";
@@ -54,11 +53,21 @@ function classify(value, m, s, sigma = 1) {
   return "✅ Normal";
 }
 
-function recommend(cpmClass, cpcClass, ctrClass) {
-  if (cpmClass === "📉 Very Low" && cpcClass === "📉 Very Low" && ctrClass === "📈 Very High") {
+// For metrics where "higher is bad" (CPM/CPC)
+function classifyBad(value, m, s, sigma = 1) {
+  if (!Number.isFinite(value) || !Number.isFinite(m) || !Number.isFinite(s) || s === 0) return "—";
+  const z = (value - m) / s;
+  if (z > sigma) return "⚠️ High";
+  if (z < -sigma) return "✅ Low";
+  return "Normal";
+}
+
+function recommendByAll(cpmClass, cpcClass, ctrClass, roas, profit) {
+  // Prioridad a negocio
+  if ((roas ?? 0) >= 1.8 && (profit ?? -1) >= 0 && cpmClass !== "⚠️ High" && cpcClass !== "⚠️ High" && ctrClass !== "📉 Very Low") {
     return "🔼 Scale budget";
   }
-  if (cpmClass === "📈 Very High" || cpcClass === "📈 Very High" || ctrClass === "📉 Very Low") {
+  if ((roas ?? 0) < 1 || (profit ?? 0) < 0 || cpmClass === "⚠️ High" || cpcClass === "⚠️ High" || ctrClass === "📉 Very Low") {
     return "🔽 Review or pause";
   }
   return "✅ Keep running";
@@ -78,8 +87,8 @@ function downloadCSV(rows) {
 /* ============== App ============== */
 export default function App() {
   const [rows, setRows] = useState([]);
-  const [sigma, setSigma] = useState(1);
-  const [ctrKeyPref, setCtrKeyPref] = useState("ctr_link_click_through_rate"); // fallback to ctr_all if missing
+  const [sigma, setSigma] = useState(1.5); // balanced default
+  const [ctrKeyPref, setCtrKeyPref] = useState("ctr_link_click_through_rate");
 
   const handleFile = (file) => {
     if (!file) return;
@@ -99,7 +108,6 @@ export default function App() {
 
   // Only [ON] + results > 0
   const onRows = useMemo(() => {
-    // try to find a “results” key regardless of header variant
     const first = rows[0] || {};
     const candidateResultsKeys = ["results", "purchases", "conversions"];
     const resultsKey =
@@ -116,15 +124,40 @@ export default function App() {
       .map((r) => ({ ...r, __results_key: resultsKey }));
   }, [rows]);
 
-  // Metric keys
-  const amountKey = "amount_spent_usd" in (onRows[0] || {}) ? "amount_spent_usd" : "amount_spent__usd";
+  // Metric keys (robust to header variants)
+  const amountKey =
+    "amount_spent_usd" in (onRows[0] || {})
+      ? "amount_spent_usd"
+      : "amount_spent_(usd)" in (onRows[0] || {})
+      ? "amount_spent_(usd)"
+      : "amount_spent";
+
   const impressionsKey = "impressions";
   const clicksAllKey = "clicks_all";
   const cpcLinkKey = "cpc_cost_per_link_click_usd";
   const ctrLinkKey = ctrKeyPref;
   const ctrAllKey = "ctr_all";
 
+  // revenue / roas candidates
+  const revenueCandidates = [
+    "website_purchases_conversion_value",
+    "purchases_conversion_value",
+    "meta_purchase_conversion_value",
+    "in_app_purchases_conversion_value",
+    "offline_purchases_conversion_value",
+  ];
+  const roasCandidates = [
+    "roas_return_on_ad_spend",
+    "purchase_roas_return_on_ad_spend",
+    "website_roas_return_on_ad_spend",
+  ];
+
   const analyzed = useMemo(() => {
+    // auto-detect available revenue/roas keys
+    const first = onRows[0] || {};
+    const revenueKey = revenueCandidates.find((k) => k in first);
+    const roasKey = roasCandidates.find((k) => k in first);
+
     const valid = onRows
       .map((r) => {
         const spent = toNumber(r[amountKey]);
@@ -135,6 +168,9 @@ export default function App() {
         const cpcLink = toNumber(r[cpcLinkKey]);
         const resultsNum = toNumber(r[r.__results_key || "results"]);
 
+        const revenue = revenueKey ? toNumber(r[revenueKey]) : NaN;
+        const roasCsv = roasKey ? toNumber(r[roasKey]) : NaN;
+
         const cpm = Number.isFinite(spent) && Number.isFinite(imps) && imps > 0 ? (spent / imps) * 1000 : NaN;
         const cpc = Number.isFinite(cpcLink)
           ? cpcLink
@@ -143,31 +179,72 @@ export default function App() {
           : NaN;
         const ctr = Number.isFinite(ctrLink) ? ctrLink : ctrAll;
 
-        return { ...r, cpm, cpc, ctr, resultsNum };
+        // Derive ROAS if not present
+        const roas = Number.isFinite(roasCsv)
+          ? roasCsv
+          : Number.isFinite(spent) && spent > 0 && Number.isFinite(revenue)
+          ? revenue / spent
+          : NaN;
+
+        const profit =
+          (Number.isFinite(revenue) ? revenue : 0) - (Number.isFinite(spent) ? spent : 0);
+
+        return { ...r, cpm, cpc, ctr, resultsNum, spend: spent, revenue, roas, profit };
       })
-      .filter((r) => Number.isFinite(r.cpm) && Number.isFinite(r.cpc) && Number.isFinite(r.ctr) && Number.isFinite(r.resultsNum) && r.resultsNum > 0);
+      .filter(
+        (r) =>
+          Number.isFinite(r.cpm) &&
+          Number.isFinite(r.cpc) &&
+          Number.isFinite(r.ctr) &&
+          Number.isFinite(r.resultsNum) &&
+          r.resultsNum > 0
+      );
 
     const cpmVals = valid.map((r) => r.cpm);
     const cpcVals = valid.map((r) => r.cpc);
     const ctrVals = valid.map((r) => r.ctr);
+    const roasVals = valid.map((r) => r.roas);
+    const profitVals = valid.map((r) => r.profit);
 
-    const m = { cpm: mean(cpmVals), cpc: mean(cpcVals), ctr: mean(ctrVals) };
-    const s = { cpm: stddev(cpmVals), cpc: stddev(cpcVals), ctr: stddev(ctrVals) };
+    const m = {
+      cpm: mean(cpmVals),
+      cpc: mean(cpcVals),
+      ctr: mean(ctrVals),
+      roas: mean(roasVals),
+      profit: mean(profitVals),
+    };
+    const s = {
+      cpm: stddev(cpmVals),
+      cpc: stddev(cpcVals),
+      ctr: stddev(ctrVals),
+      roas: stddev(roasVals),
+      profit: stddev(profitVals),
+    };
 
     const rows = valid.map((r) => {
-      const cpmClass = classify(r.cpm, m.cpm, s.cpm, sigma);
-      const cpcClass = classify(r.cpc, m.cpc, s.cpc, sigma);
-      const ctrClass = classify(r.ctr, m.ctr, s.ctr, sigma);
-      const action = recommend(cpmClass, cpcClass, ctrClass);
+      const cpmClass = classifyBad(r.cpm, m.cpm, s.cpm, sigma);
+      const cpcClass = classifyBad(r.cpc, m.cpc, s.cpc, sigma);
+      const ctrClass = classifyGood(r.ctr, m.ctr, s.ctr, sigma);
+      const roasClass = classifyGood(r.roas, m.roas, s.roas, sigma);
+      const profitClass = classifyGood(r.profit, m.profit, s.profit, sigma);
+
+      const action = recommendByAll(cpmClass, cpcClass, ctrClass, r.roas, r.profit);
+
       return {
         campaign_name: r.campaign_name,
         results: r.resultsNum,
+        spend: Number.isFinite(r.spend) ? Number(r.spend.toFixed(2)) : "—",
+        revenue: Number.isFinite(r.revenue) ? Number(r.revenue.toFixed(2)) : "—",
+        profit: Number.isFinite(r.profit) ? Number(r.profit.toFixed(2)) : "—",
+        roas: Number.isFinite(r.roas) ? Number(r.roas.toFixed(2)) : "—",
         cpm: Number(r.cpm.toFixed(2)),
         cpm_class: cpmClass,
         cpc: Number(r.cpc.toFixed(2)),
         cpc_class: cpcClass,
         ctr: Number(r.ctr.toFixed(2)),
         ctr_class: ctrClass,
+        roas_class: roasClass,
+        profit_class: profitClass,
         action,
       };
     });
@@ -181,7 +258,9 @@ export default function App() {
         <header className="header">
           <div>
             <h1 className="title">Gauss Campaign Dashboard</h1>
-            <p className="muted">Upload a Meta campaigns CSV. Only campaigns starting with <b>[ON]</b> and with <b>results &gt; 0</b> will be analyzed.</p>
+            <p className="muted">
+              Upload a Meta campaigns CSV. Only campaigns starting with <b>[ON]</b> and with <b>results &gt; 0</b> will be analyzed.
+            </p>
           </div>
           <label className="btn btn-white">
             <Upload size={18} />
@@ -193,9 +272,22 @@ export default function App() {
         {/* Controls */}
         <div className="grid">
           <div className="card">
-            <div className="card-title"><Settings size={16} /><span>Sigma (z-threshold)</span></div>
-            <input type="range" min={0.5} max={2} step={0.1} value={sigma} onChange={(e) => setSigma(Number(e.target.value))} className="range" />
-            <div className="muted">Current: <b>{sigma.toFixed(1)}σ</b></div>
+            <div className="card-title">
+              <Settings size={16} />
+              <span>Sigma (z-threshold)</span>
+            </div>
+            <input
+              type="range"
+              min={0.5}
+              max={2}
+              step={0.1}
+              value={sigma}
+              onChange={(e) => setSigma(Number(e.target.value))}
+              className="range"
+            />
+            <div className="muted">
+              Current: <b>{sigma.toFixed(1)}σ</b> — try 1.5σ for a balanced view.
+            </div>
           </div>
           <div className="card">
             <div className="card-title">CTR column</div>
@@ -216,22 +308,33 @@ export default function App() {
 
         {/* Summary */}
         <div className="grid">
-          <div className="card stat"><div className="muted">[ON] campaigns analyzed</div><div className="stat-value">{analyzed.rows.length}</div></div>
+          <div className="card stat">
+            <div className="muted">[ON] campaigns analyzed</div>
+            <div className="stat-value">{analyzed.rows.length}</div>
+          </div>
           <div className="card">
-            <div className="muted">Mean CPM / CPC / CTR</div>
+            <div className="muted">Mean CPM / CPC / CTR / ROAS / Profit</div>
             <div className="stat-inline">
               {Number.isFinite(analyzed.m.cpm) ? analyzed.m.cpm.toFixed(2) : "—"} /
               {" "}{Number.isFinite(analyzed.m.cpc) ? analyzed.m.cpc.toFixed(2) : "—"} /
-              {" "}{Number.isFinite(analyzed.m.ctr) ? analyzed.m.ctr.toFixed(2) : "—"}%
+              {" "}{Number.isFinite(analyzed.m.ctr) ? analyzed.m.ctr.toFixed(2) : "—"}% /
+              {" "}{Number.isFinite(analyzed.m.roas) ? analyzed.m.roas.toFixed(2) : "—"} /
+              {" "}{Number.isFinite(analyzed.m.profit) ? analyzed.m.profit.toFixed(2) : "—"}
             </div>
-            <div className="tiny">Std dev: {Number.isFinite(analyzed.s.cpm) ? analyzed.s.cpm.toFixed(2) : "—"} / {Number.isFinite(analyzed.s.cpc) ? analyzed.s.cpc.toFixed(2) : "—"} / {Number.isFinite(analyzed.s.ctr) ? analyzed.s.ctr.toFixed(2) : "—"}</div>
+            <div className="tiny">
+              Std dev: {Number.isFinite(analyzed.s.cpm) ? analyzed.s.cpm.toFixed(2) : "—"} /{" "}
+              {Number.isFinite(analyzed.s.cpc) ? analyzed.s.cpc.toFixed(2) : "—"} /{" "}
+              {Number.isFinite(analyzed.s.ctr) ? analyzed.s.ctr.toFixed(2) : "—"} /{" "}
+              {Number.isFinite(analyzed.s.roas) ? analyzed.s.roas.toFixed(2) : "—"} /{" "}
+              {Number.isFinite(analyzed.s.profit) ? analyzed.s.profit.toFixed(2) : "—"}
+            </div>
           </div>
           <div className="card">
             <div className="muted">Actions (count)</div>
             <div className="actions-counts">
-              <span>🔼 {analyzed.rows.filter(r=>r.action.includes("Scale")).length}</span>
-              <span>✅ {analyzed.rows.filter(r=>r.action.includes("Keep")).length}</span>
-              <span>🔽 {analyzed.rows.filter(r=>r.action.includes("Review")).length}</span>
+              <span>🔼 {analyzed.rows.filter((r) => r.action.includes("Scale")).length}</span>
+              <span>✅ {analyzed.rows.filter((r) => r.action.includes("Keep")).length}</span>
+              <span>🔽 {analyzed.rows.filter((r) => r.action.includes("Review")).length}</span>
             </div>
           </div>
         </div>
@@ -243,12 +346,18 @@ export default function App() {
               <tr>
                 <th>Campaign</th>
                 <th>Results</th>
+                <th>Spend</th>
+                <th>Revenue</th>
+                <th>Profit</th>
+                <th>Profit class</th>
+                <th>ROAS</th>
+                <th>ROAS class</th>
                 <th>CPM</th>
-                <th>Class</th>
+                <th>CPM class</th>
                 <th>CPC</th>
-                <th>Class</th>
+                <th>CPC class</th>
                 <th>CTR (%)</th>
-                <th>Class</th>
+                <th>CTR class</th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -257,6 +366,12 @@ export default function App() {
                 <tr key={i}>
                   <td title={r.campaign_name} className="truncate">{r.campaign_name}</td>
                   <td>{r.results}</td>
+                  <td>{r.spend}</td>
+                  <td>{r.revenue}</td>
+                  <td>{r.profit}</td>
+                  <td>{r.profit_class}</td>
+                  <td>{r.roas}</td>
+                  <td>{r.roas_class}</td>
                   <td>{r.cpm}</td>
                   <td>{r.cpm_class}</td>
                   <td>{r.cpc}</td>
@@ -271,13 +386,13 @@ export default function App() {
 
           {!analyzed.rows.length && (
             <div className="empty">
-              Upload a CSV to see results. Required columns: <code>Campaign name</code>, <code>Amount spent (USD)</code>, <code>Impressions</code>, <code>Clicks (all)</code>, <code>CTR (link click-through rate)</code> or <code>CTR (all)</code>, and optionally <code>CPC (cost per link click) (USD)</code>.
+              Upload a CSV to see results. Required columns: <code>Campaign name</code>, <code>Amount spent (USD)</code>, <code>Impressions</code>, <code>Clicks (all)</code>, a CTR column (<code>link</code> or <code>all</code>) and preferably <code>Purchases conversion value</code> or <code>Website purchases conversion value</code>.
             </div>
           )}
         </div>
 
         <div className="tiny note">
-          Rules: 🔼 Scale when CPM & CPC are 📉 Very Low and CTR is 📈 Very High. 🔽 Review if any metric is 📈 Very High or CTR is 📉 Very Low. Else: ✅ Keep running.
+          Rules: 🔼 Scale when ROAS ≥ 1.8 and Profit ≥ 0, with CPM/CPC not high and CTR not very low. 🔽 Review if ROAS &lt; 1, Profit &lt; 0, or CPM/CPC high or CTR very low. Else: ✅ Keep running.
           Calculations are only for campaigns whose name starts with [ON] and have results &gt; 0.
         </div>
       </div>
